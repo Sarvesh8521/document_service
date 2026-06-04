@@ -58,32 +58,39 @@ What makes DocLens different from a generic summarizer is **domain-aware prompti
 ```
 document_service/
 │
-├── app.py                      # Streamlit frontend — UI, Groq integration, PDF export
-├── .env                        # Environment variables (not committed)
-├── .gitignore
-├── README.md
+├── frontend/                        ← All Streamlit UI code
+│   ├── app.py                       ← Entry point (~60 lines: config, session state, router)
+│   ├── config.py                    ← BASE_URL, GROQ_API_KEY, constants
+│   ├── themes.py                    ← THEMES dict + get_css()
+│   │
+│   ├── components/
+│   │   ├── header.py                ← render_header() — shared across all pages
+│   │   └── pdf_report.py            ← generate_pdf_report()
+│   │
+│   ├── views/
+│   │   ├── login.py                 ← page_login()
+│   │   ├── signup.py                ← page_signup()
+│   │   ├── dashboard.py             ← page_dashboard()
+│   │   └── analyser.py              ← page_analyser()
+│   │
+│   └── services/
+│       └── api_client.py            ← api_login(), api_signup(), api_summarize()
 │
-└── smart_summarizer/           # Django backend
-    ├── manage.py
-    ├── db.sqlite3
-    ├── requirements.txt
-    │
-    ├── smart_summarizer/       # Project configuration
-    │   ├── settings.py
-    │   └── urls.py
-    │
-    ├── user/                   # Authentication app
-    │   ├── models/             # Custom User model with UUID primary key
-    │   ├── views/              # Register, Login, Logout endpoints
-    │   ├── serializers/        # Request validation and response formatting
-    │   └── urls.py
-    │
-    └── documents/              # Document processing app
-        ├── models/             # Document model with user foreign key
-        ├── views/              # Upload and retrieval endpoints
-        ├── serializers/        # Document data formatting
-        ├── services/           # File parsing logic per format
-        └── urls.py
+├── ai/                              ← AI/LLM logic, fully decoupled from UI
+│   ├── prompts.py                   ← PROMPTS dict + DETAIL_INSTRUCTIONS
+│   └── groq_client.py               ← build_prompt(), call_groq(), retry logic
+│
+├── smart_summarizer/                ← Django backend
+│   ├── manage.py
+│   ├── db.sqlite3
+│   ├── requirements.txt
+│   ├── smart_summarizer/            ← Project settings and main URLs
+│   ├── user/                        ← Authentication app (register, login, logout)
+│   └── documents/                   ← Document processing app (upload, parse, retrieve)
+│
+├── .env                             ← API keys — never committed to GitHub
+├── .gitignore
+└── README.md
 ```
 
 ---
@@ -128,7 +135,7 @@ pip3 install streamlit groq python-dotenv reportlab requests
 
 ### 4. Configure your API key
 
-Create a `.env` file in the `document_service` root folder:
+Create a `.env` file in the `document_service` root:
 
 ```bash
 touch .env
@@ -142,7 +149,20 @@ GROQ_API_KEY=your_groq_api_key_here
 
 ---
 
-### 5. Run the application
+### 5. Set Python path
+
+Add this to your shell profile so imports work correctly:
+
+```bash
+echo 'export PYTHONPATH="/path/to/document_service:$PYTHONPATH"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+Replace `/path/to/document_service` with the actual path on your machine.
+
+---
+
+### 6. Run the application
 
 DocLens requires two processes running simultaneously — open two terminal windows.
 
@@ -154,7 +174,8 @@ python3 manage.py runserver
 
 **Terminal 2 — Streamlit frontend:**
 ```bash
-streamlit run app.py
+cd document_service
+streamlit run frontend/app.py
 ```
 
 Open [http://localhost:8501](http://localhost:8501) in your browser.
@@ -190,12 +211,12 @@ Open [http://localhost:8501](http://localhost:8501) in your browser.
 
 1. The uploaded file is parsed by the Django backend using format-specific parsers (PyMuPDF for PDFs, python-docx for Word files, pandas for CSVs)
 2. The extracted plain text is sent to the Streamlit frontend
-3. A domain-specific prompt is constructed — combining role instructions, detail level preferences, and the document text
-4. The prompt is sent to Groq's API running Llama 3.3 70B
+3. A domain-specific prompt is constructed in `ai/prompt_builder.py` — combining role instructions, detail level preferences, and the document text
+4. The prompt is sent to Groq's API running Llama 3.3 70B via `ai/groq_client.py`
 5. The model returns a structured JSON response with four fields: executive summary, key points, action items, and data highlights
 6. The response is parsed and rendered in the UI
 
-Each domain has a tailored system prompt. For example, a **Legal** document prompt instructs the model to focus on clauses, obligations, deadlines, and compliance requirements — while a **Finance** prompt focuses on revenue, expenses, ratios, and forecasts.
+Each domain has a tailored system prompt defined in `ai/prompts.py`. For example, a **Legal** document prompt instructs the model to focus on clauses, obligations, deadlines, and compliance requirements — while a **Finance** prompt focuses on revenue, expenses, ratios, and forecasts.
 
 ---
 
@@ -214,4 +235,5 @@ Built as part of a two-week internship assignment focused on:
 - Full-stack Python web development
 - LLM integration and prompt engineering
 - REST API design with Django
+- Modular code architecture
 - Collaborative Git-based development workflow
