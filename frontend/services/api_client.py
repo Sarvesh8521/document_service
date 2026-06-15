@@ -148,6 +148,46 @@ def api_summarize(file_name: str, category: str, detail_level: str, uploaded_fil
     }
 
 
+def _summarize_text(parsed_text: str, file_type: str, file_size: int,
+                    document_id: str, file_name: str, category: str, detail_level: str) -> dict:
+    """
+    Runs AI summarization on already-parsed text.
+    Used by combined mode — text from multiple files is merged before calling this.
+    """
+    prompt = build_prompt(parsed_text, category, detail_level, file_type)
+
+    try:
+        ai_result = call_groq(prompt)
+    except json.JSONDecodeError:
+        raise ValueError("The AI returned an unexpected response. Please try again.")
+    except Exception as e:
+        err = str(e).lower()
+        if "rate limit" in err or "429" in err:
+            raise ValueError("Too many requests. Please wait a moment and try again.")
+        elif "api key" in err or "401" in err or "403" in err:
+            raise ValueError("Invalid Groq API key. Please check your .env file.")
+        elif "context" in err or "token" in err:
+            raise ValueError("Combined document is too long. Try fewer or shorter files.")
+        else:
+            raise ValueError("AI summarization is temporarily unavailable. Please try again.")
+
+    data_highlights = ai_result.get("data_highlights", [])
+    data_highlights += [
+        f"File type: {file_type.upper()}",
+        f"Combined size: {round(file_size / 1024, 1)} KB" if file_size else "Multiple files combined",
+    ]
+
+    return {
+        "executive_summary": ai_result.get("executive_summary", "Summary not available."),
+        "key_points":        ai_result.get("key_points", []),
+        "action_items":      ai_result.get("action_items", []),
+        "data_highlights":   data_highlights[:6],
+        "category":          category,
+        "detail_level":      detail_level,
+        "file_name":         file_name,
+    }
+
+
 def _load_history():
     """
     Private helper — fetches the user's document history from Django

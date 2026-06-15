@@ -42,6 +42,9 @@ defaults = {
     "auth_error":         "",
     "auth_success":       "",
     "theme":              "light",
+    "results":            [],
+    "result_mode":        "individual",
+    "summary_mode":       None,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
