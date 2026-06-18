@@ -14,10 +14,14 @@ def api_login(email: str, password: str) -> dict:
         raise ValueError("Please fill in all fields.")
 
     r = st.session_state.http_session.post(
-        f"{BASE_URL}/api/users/login/",
+        f"{BASE_URL}/users/login/",
         json={"email": email, "password": password},
     )
-    data = r.json()
+
+    try:
+        data = r.json()
+    except Exception:
+        raise ValueError(f"Server returned an unexpected response (status {r.status_code}). Make sure the backend is running.")
 
     if r.status_code == 200:
         name = f"{data.get('first_name','')} {data.get('last_name','')}".strip() \
@@ -52,7 +56,7 @@ def api_signup(name: str, email: str, password: str, confirm: str) -> dict:
     user_name  = email.split("@")[0].replace(".", "_").lower()
 
     r = st.session_state.http_session.post(
-        f"{BASE_URL}/api/users/register/",
+        f"{BASE_URL}/users/register/",
         json={
             "first_name": first_name,
             "last_name":  last_name,
@@ -76,76 +80,126 @@ def api_signup(name: str, email: str, password: str, confirm: str) -> dict:
     raise ValueError("Registration failed. Please try again.")
 
 
-def api_summarize(file_name: str, category: str, detail_level: str, uploaded_file) -> dict:
+def api_upload_files(uploaded_files: list) -> list:
     """
-    Full summarization pipeline:
-    1. Upload file to Django → get parsed text back
-    2. Send parsed text to Groq → get AI summary back
-    3. Return structured result dict for the UI to display
+    Uploads one or more files to Sarvesh's new bulk upload endpoint.
+    Sends all files in a single POST request using the 'files' field (array).
+    Returns a list of parsed document dicts — one per successfully uploaded file.
+
+    New API response format (array):
+    [
+        {
+            "filename": "report.pdf",
+            "success": true,
+            "error": null,
+            "document": {
+                "document_id": 1,
+                "id": "uuid...",
+                "original_name": "report.pdf",
+                "parsed_text": "...",
+                "file_type": "pdf",
+                "file_size": 12345,
+                ...
+            }
+        },
+        ...
+    ]
     """
-    # ── Step 1: Upload to Django ──
     csrf = st.session_state.http_session.cookies.get("csrftoken", "")
-    uploaded_file.seek(0)  # Reset file pointer before sending
+
+    # Build multipart files list — same field name "files" for each file
+    # requests allows multiple values for the same field name this way
+    files_payload = []
+    for f in uploaded_files:
+        f.seek(0)
+        files_payload.append(("files", (f.name, f, "application/octet-stream")))
 
     resp = st.session_state.http_session.post(
-        f"{BASE_URL}/api/documents/upload/",
-        files={"file": (uploaded_file.name, uploaded_file, "application/octet-stream")},
+        f"{BASE_URL}/documents/upload/",
+        files=files_payload,
         headers={"X-CSRFToken": csrf, "Referer": BASE_URL},
     )
 
     if resp.status_code == 403:
         raise ValueError("Session expired. Please sign out and sign back in.")
     if resp.status_code == 413:
-        raise ValueError("File is too large. Please upload a file under 200MB.")
+        raise ValueError("Files are too large. Please upload files under 200MB each.")
     if resp.status_code != 201:
         raise ValueError("File upload failed. Please check your connection and try again.")
 
-    doc         = resp.json()
+    results = resp.json()  # list of {filename, success, error, document}
+
+    # Filter to only successful uploads and return their document dicts
+    parsed_docs = []
+    for item in results:
+        if item.get("success") and item.get("document"):
+            parsed_docs.append(item["document"])
+        elif not item.get("success"):
+            # Log the failure but don't crash — other files may have succeeded
+            st.warning(f"{item.get('filename', 'Unknown file')}: {item.get('error', 'Upload failed')}")
+
+    return parsed_docs
+
+
+def api_summarize(file_name: str, category: str, detail_level: str, uploaded_file) -> dict:
+    """
+    Summarizes a single file.
+    Uploads it via the new bulk endpoint (passing one file),
+    then runs Groq AI on the parsed text.
+    """
+    docs = api_upload_files([uploaded_file])
+
+    if not docs:
+        raise ValueError("File upload failed or file could not be parsed.")
+
+    doc = docs[0]
+    return _summarize_doc(doc, file_name, category, detail_level)
+
+
+def api_summarize_multiple(uploaded_files: list, category: str, detail_level: str) -> list:
+    """
+    Uploads all files at once using the new bulk endpoint,
+    then runs Groq AI on each parsed document individually.
+    Returns a list of result dicts — one per file.
+    """
+    docs = api_upload_files(uploaded_files)
+
+    results = []
+    for doc in docs:
+        file_name = doc.get("original_name", "Unknown")
+        try:
+            result = _summarize_doc(doc, file_name, category, detail_level)
+            results.append(result)
+        except Exception as e:
+            st.error(f"{file_name}: {str(e)}")
+
+    return results
+
+
+def _summarize_doc(doc: dict, file_name: str, category: str, detail_level: str) -> dict:
+    """
+    Runs Groq AI summarization on a parsed document dict from Django.
+    Shared by both single and multiple file flows.
+    """
     parsed_text = doc.get("parsed_text", "")
     file_type   = doc.get("file_type", "unknown")
     file_size   = doc.get("file_size", 0)
-    document_id = str(doc.get("document_id", ""))
+    document_id = str(doc.get("id") or doc.get("document_id", ""))
 
     if doc.get("parse_status") == "failed":
         raise ValueError("Could not read this file. Make sure it is not password-protected or corrupted.")
     if not parsed_text.strip():
         raise ValueError("Document appears to be empty.")
 
-    # ── Step 2: AI summarization via Groq ──
-    prompt = build_prompt(parsed_text, category, detail_level, file_type)
-
-    try:
-        ai_result = call_groq(prompt)
-    except json.JSONDecodeError:
-        raise ValueError("The AI returned an unexpected response. Please try again.")
-    except Exception as e:
-        err = str(e).lower()
-        if "rate limit" in err or "429" in err:
-            raise ValueError("Too many requests. Please wait a moment and try again.")
-        elif "api key" in err or "401" in err or "403" in err:
-            raise ValueError("Invalid Groq API key. Please check your .env file.")
-        elif "context" in err or "token" in err:
-            raise ValueError("Document is too long. Try a shorter document.")
-        else:
-            raise ValueError("AI summarization is temporarily unavailable. Please try again.")
-
-    # ── Step 3: Build result dict ──
-    data_highlights = ai_result.get("data_highlights", [])
-    data_highlights += [
-        f"File type: {file_type.upper()}",
-        f"File size: {round(file_size / 1024, 1)} KB",
-        f"Doc ID: {document_id[:8]}...",
-    ]
-
-    return {
-        "executive_summary": ai_result.get("executive_summary", "Summary not available."),
-        "key_points":        ai_result.get("key_points", []),
-        "action_items":      ai_result.get("action_items", []),
-        "data_highlights":   data_highlights[:6],
-        "category":          category,
-        "detail_level":      detail_level,
-        "file_name":         file_name,
-    }
+    return _summarize_text(
+        parsed_text=parsed_text,
+        file_type=file_type,
+        file_size=file_size,
+        document_id=document_id,
+        file_name=file_name,
+        category=category,
+        detail_level=detail_level,
+    )
 
 
 def _summarize_text(parsed_text: str, file_type: str, file_size: int,
@@ -196,7 +250,7 @@ def _load_history():
     try:
         csrf = st.session_state.http_session.cookies.get("csrftoken", "")
         history_resp = st.session_state.http_session.get(
-            f"{BASE_URL}/api/documents/",
+            f"{BASE_URL}/documents/",
             headers={"X-CSRFToken": csrf, "Referer": BASE_URL},
         )
         if history_resp.status_code == 200:

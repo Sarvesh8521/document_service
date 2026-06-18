@@ -1,9 +1,8 @@
 import streamlit as st
 from frontend.components.header import render_header
 from frontend.components.pdf_report import generate_pdf_report
-from frontend.services.api_client import api_summarize, _summarize_text
+from frontend.services.api_client import api_summarize, api_summarize_multiple, api_upload_files, _summarize_text
 from frontend.themes import THEMES
-from frontend.config import BASE_URL
 
 
 def page_analyser():
@@ -142,60 +141,51 @@ def page_analyser():
             mode = st.session_state.get("summary_mode", "individual")
 
             if not multiple or mode == "individual":
-                # ── Individual: one API call per file ──
-                results = []
-                for i, f in enumerate(uploaded_files):
-                    with st.spinner(f"Analysing {f.name} ({i+1}/{len(uploaded_files)})…"):
-                        try:
-                            result = api_summarize(
-                                file_name=f.name,
-                                category=st.session_state.selected_category,
-                                detail_level=st.session_state.selected_detail,
-                                uploaded_file=f,
-                            )
-                            results.append(result)
+                # ── Individual: upload all at once, summarise each separately ──
+                with st.spinner(f"Uploading {len(uploaded_files)} file(s) and analysing…"):
+                    try:
+                        results = api_summarize_multiple(
+                            uploaded_files=uploaded_files,
+                            category=st.session_state.selected_category,
+                            detail_level=st.session_state.selected_detail,
+                        )
+                        for r in results:
                             st.session_state.history.append({
-                                "file_name":    f.name,
+                                "file_name":    r["file_name"],
                                 "category":     st.session_state.selected_category,
                                 "detail_level": st.session_state.selected_detail,
                             })
-                        except Exception as e:
-                            st.error(f"{f.name}: {str(e)}")
-
-                st.session_state.results     = results
-                st.session_state.result      = results[0] if results else None
-                st.session_state.result_mode = "individual"
+                        st.session_state.results     = results
+                        st.session_state.result      = results[0] if results else None
+                        st.session_state.result_mode = "individual"
+                    except Exception as e:
+                        st.error(str(e))
 
             else:
-                # ── Combined: upload all, merge text, one AI call ──
+                # ── Combined: upload all at once, merge parsed text, one AI call ──
                 with st.spinner(f"Uploading and combining {len(uploaded_files)} documents…"):
                     try:
-                        all_texts  = []
-                        file_names = []
-                        csrf       = st.session_state.http_session.cookies.get("csrftoken", "")
+                        # Upload all files in one request using new bulk endpoint
+                        docs = api_upload_files(uploaded_files)
 
-                        for f in uploaded_files:
-                            f.seek(0)
-                            resp = st.session_state.http_session.post(
-                                f"{BASE_URL}/api/documents/upload/",
-                                files={"file": (f.name, f, "application/octet-stream")},
-                                headers={"X-CSRFToken": csrf, "Referer": BASE_URL},
-                            )
-                            if resp.status_code == 201:
-                                doc  = resp.json()
+                        if not docs:
+                            st.error("Could not parse any of the uploaded files.")
+                        else:
+                            # Merge all parsed text together
+                            all_texts  = []
+                            file_names = []
+                            for doc in docs:
                                 text = doc.get("parsed_text", "")
+                                name = doc.get("original_name", "Unknown")
                                 if text.strip():
-                                    all_texts.append(f"--- {f.name} ---\n{text}")
-                                    file_names.append(f.name)
+                                    all_texts.append(f"--- {name} ---\n{text}")
+                                    file_names.append(name)
                                     st.session_state.history.append({
-                                        "file_name":    f.name,
+                                        "file_name":    name,
                                         "category":     st.session_state.selected_category,
                                         "detail_level": st.session_state.selected_detail,
                                     })
 
-                        if not all_texts:
-                            st.error("Could not parse any of the uploaded files.")
-                        else:
                             combined_text = "\n\n".join(all_texts)
                             combined_name = f"{len(file_names)} documents combined"
                             result = _summarize_text(
