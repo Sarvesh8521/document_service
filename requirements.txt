@@ -1,0 +1,7 @@
+
+streamlit
+requests
+groq
+python-dotenv
+
+reportlab

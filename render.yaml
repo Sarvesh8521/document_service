@@ -1,0 +1,25 @@
+services:
+- type: web
+    name: doclens-backend
+    runtime: python
+    rootDir: smart_summarizer
+    buildCommand: pip install -r requirements.txt && python manage.py migrate
+    startCommand: gunicorn smart_summarizer.wsgi:application
+    envVars:
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: DEBUG
+        value: "False"
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+
+  - type: web
+    name: doclens-frontend
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run frontend/app.py --server.port $PORT --server.address 0.0.0.0
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.11.0"
